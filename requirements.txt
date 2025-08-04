@@ -9,4 +9,4 @@ openai
 shap
 pytest
 torch
-gunicorn
+gunicorn==20.1.0
