@@ -1,35 +1,11 @@
 from flask import Flask, render_template, request
-import joblib
-import pandas as pd
-import shap
-from transformers import pipeline
 from collections import defaultdict
-
-# ─── Load your trained pipeline ───
-model = joblib.load("logistic_model_pipeline.pkl")
+import os
+import pandas as pd
 
 # ─── Feature lists ───
 numeric_features = ['Age', 'Avg_Daily_Screen_Time_hr', 'Educational_to_Recreational_Ratio']
 categorical_features = ['Gender', 'Primary_Device', 'Health_Impacts', 'Urban_or_Rural']
-
-# ─── Unpack pipeline steps ───
-preproc = model.named_steps['preproc']
-clf     = model.named_steps['clf']
-
-# ─── Prepare SHAP explainer ───
-df_bg = pd.read_csv("Indian_Kids_Screen_Time.csv")[numeric_features + categorical_features]
-df_bg_sample = df_bg.sample(n=100, random_state=0)
-X_bg_processed = preproc.transform(df_bg_sample)
-explainer = shap.LinearExplainer(clf, X_bg_processed, feature_perturbation="interventional")
-
-# ─── GenAI explainer (Flan-T5) ───
-flan_generator = pipeline(
-    "text2text-generation",
-    model="google/flan-t5-large",
-    max_new_tokens=200,
-    do_sample=True,
-    temperature=0.7
-)
 
 # ─── Human-friendly feature names ───
 feature_aliases = {
@@ -42,23 +18,23 @@ feature_aliases = {
     "Urban_or_Rural": "Living Environment"
 }
 
+# ─── Placeholders for heavy resources ───
+app = Flask(__name__)
+model = None
+preproc = None
+explainer = None
+flan_generator = None
+
 def consolidate_features(features):
-    """
-    Merge contributions of repeated features by summing their SHAP values.
-    """
     merged = defaultdict(float)
     for name, val in features:
         merged[name] += val
     return list(merged.items())
 
 def generate_nl_explanation(top_features, feature_values):
-    # 1. Consolidate duplicates
     top_features = consolidate_features(top_features)
-
-    # 2. Sort by absolute impact and take top 3
     top_features = sorted(top_features, key=lambda x: abs(x[1]), reverse=True)[:3]
 
-    # 3. Build prompt
     prompt = (
         "You're a kind assistant helping a concerned parent understand their child's screen time habits. "
         "Below are the most important factors and how they influenced the result:\n\n"
@@ -68,7 +44,7 @@ def generate_nl_explanation(top_features, feature_values):
         pretty = feature_aliases.get(name, name)
         value = feature_values.get(name, "N/A")
         direction = "increased" if contrib > 0 else "reduced"
-        if direction == "increased":
+        if contrib > 0:
             any_increase = True
         prompt += f"- {pretty} was {value}, which {direction} the chances of exceeding healthy screen time.\n"
 
@@ -79,27 +55,21 @@ def generate_nl_explanation(top_features, feature_values):
     if any_increase:
         prompt += " Also, suggest one gentle tip to help improve the child's screen time habits."
 
-    # 4. Call GenAI
-    output = flan_generator(prompt, max_new_tokens=200)
-    return output[0]["generated_text"].strip()
-
-# ─── add this below your generate_nl_explanation ───
+    out = flan_generator(prompt, max_new_tokens=200)
+    return out[0]["generated_text"].strip()
 
 def generate_user_feedback(explanation_text):
     prompt = (
         f"Here’s an explanation of why a child's screen time prediction was made:\n\n"
         f"{explanation_text}\n\n"
         "Now, as a friendly parenting coach, give 2–3 distinct, concise, and non-repetitive suggestions"
-        "to help the parent support healthier screen time habits. "
-        "Do not repeat any phrase."
+        " to help the parent support healthier screen time habits. Do not repeat any phrase."
     )
     out = flan_generator(prompt, max_new_tokens=150)
     return out[0]["generated_text"].strip()
 
 import re
-
 def clean_feedback(text):
-    # Split into sentences by period or line break
     parts = re.split(r'(?<=[.!?])\s+', text.strip())
     seen, result = set(), []
     for s in parts:
@@ -109,19 +79,46 @@ def clean_feedback(text):
             result.append(s)
     return " ".join(result)
 
+@app.before_first_request
+def init_resources():
+    """
+    Load model, SHAP explainer, and Flan-T5 pipeline only once—
+    after Gunicorn has bound to the port.
+    """
+    global model, preproc, explainer, flan_generator
 
-# ─── Flask App ───
-app = Flask(__name__)
+    # Lazy‐import heavy libs
+    import joblib
+    import shap
+    from transformers import pipeline
+
+    # ─── 1) Load your trained pipeline ───
+    model = joblib.load("logistic_model_pipeline.pkl")
+    preproc = model.named_steps['preproc']
+    clf     = model.named_steps['clf']
+
+    # ─── 2) Prepare SHAP explainer ───
+    df_bg = pd.read_csv("Indian_Kids_Screen_Time.csv")[numeric_features + categorical_features]
+    df_bg_sample = df_bg.sample(n=100, random_state=0)
+    X_bg_processed = preproc.transform(df_bg_sample)
+    explainer = shap.LinearExplainer(clf, X_bg_processed, feature_perturbation="interventional")
+
+    # ─── 3) GenAI explainer (Flan-T5) ───
+    flan_generator = pipeline(
+        "text2text-generation",
+        model="google/flan-t5-large",
+        max_new_tokens=200,
+        do_sample=True,
+        temperature=0.7
+    )
 
 @app.route("/", methods=["GET", "POST"])
 def predict():
-    result      = None
-    explanation = None
-    feedback    = None 
+    result = explanation = feedback = None
 
     if request.method == "POST":
         # 1. Gather inputs
-        feature_values = {
+        fv = {
             "Age": float(request.form["age"]),
             "Avg_Daily_Screen_Time_hr": float(request.form["screen_time"]),
             "Educational_to_Recreational_Ratio": float(request.form["ratio"]),
@@ -130,7 +127,7 @@ def predict():
             "Health_Impacts": request.form["health"],
             "Urban_or_Rural": request.form["location"]
         }
-        input_df = pd.DataFrame([feature_values])
+        input_df = pd.DataFrame([fv])
 
         # 2. Make prediction
         pred = model.predict(input_df)[0]
@@ -141,26 +138,23 @@ def predict():
         shap_vals = explainer.shap_values(X_proc)
         sample_contribs = shap_vals[0] if not isinstance(shap_vals, list) else shap_vals[1][0]
 
-        # 4. Map back to original features (collapse one-hot back to base)
-        cat_ohe = preproc.named_transformers_['cat']['onehot']
-        cat_names = cat_ohe.get_feature_names_out(categorical_features)
+        # 4. Map back to original features
+        cat_ohe    = preproc.named_transformers_['cat']['onehot']
+        cat_names  = cat_ohe.get_feature_names_out(categorical_features)
         feature_names = numeric_features + list(cat_names)
+        raw_feats  = list(zip(feature_names, sample_contribs))
 
-        raw_feats = list(zip(feature_names, sample_contribs))
-
-        # 5. Group one-hot columns into originals
+        # 5. Group one-hot columns
         grouped = defaultdict(float)
         for name, val in raw_feats:
             base = name.split('_')[0] if name in cat_names else name
             grouped[base] += val
         top_feats = list(grouped.items())
 
-        # 6. Generate explanation
-        explanation = generate_nl_explanation(top_feats, feature_values)
-
-        # 7. Generate follow-up feedback for the parent
-        raw = generate_user_feedback(explanation)
-        feedback = clean_feedback(raw)
+        # 6. Generate explanation & feedback
+        explanation = generate_nl_explanation(top_feats, fv)
+        raw_fb      = generate_user_feedback(explanation)
+        feedback    = clean_feedback(raw_fb)
 
     return render_template("form.html",
                            result=result,
@@ -168,7 +162,5 @@ def predict():
                            feedback=feedback)
 
 if __name__ == "__main__":
-    import os
-    port = int(os.environ.get("PORT", 5000))  # default to 5000 for local testing
-    app.run(debug=False, host="0.0.0.0", port=port)
-
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
