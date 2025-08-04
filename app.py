@@ -4,6 +4,7 @@ import pandas as pd
 import shap
 from transformers import pipeline
 from collections import defaultdict
+import os
 
 # ─── Load your trained pipeline ───
 model = joblib.load("logistic_model_pipeline.pkl")
