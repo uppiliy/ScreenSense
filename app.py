@@ -1,6 +1,7 @@
+import os
+import re
 from flask import Flask, render_template, request
 from collections import defaultdict
-import os
 import pandas as pd
 
 # ─── Feature lists ───
@@ -18,8 +19,10 @@ feature_aliases = {
     "Urban_or_Rural": "Living Environment"
 }
 
-# ─── Placeholders for heavy resources ───
 app = Flask(__name__)
+
+# Placeholders for lazy‐loaded resources
+_loaded = False
 model = None
 preproc = None
 explainer = None
@@ -42,11 +45,11 @@ def generate_nl_explanation(top_features, feature_values):
     any_increase = False
     for name, contrib in top_features:
         pretty = feature_aliases.get(name, name)
-        value = feature_values.get(name, "N/A")
+        val = feature_values.get(name, "N/A")
         direction = "increased" if contrib > 0 else "reduced"
         if contrib > 0:
             any_increase = True
-        prompt += f"- {pretty} was {value}, which {direction} the chances of exceeding healthy screen time.\n"
+        prompt += f"- {pretty} was {val}, which {direction} the chances of exceeding healthy screen time.\n"
 
     prompt += (
         "\nPlease explain this in simple and caring language (2–3 sentences). "
@@ -62,13 +65,12 @@ def generate_user_feedback(explanation_text):
     prompt = (
         f"Here’s an explanation of why a child's screen time prediction was made:\n\n"
         f"{explanation_text}\n\n"
-        "Now, as a friendly parenting coach, give 2–3 distinct, concise, and non-repetitive suggestions"
-        " to help the parent support healthier screen time habits. Do not repeat any phrase."
+        "Now, as a friendly parenting coach, give 2–3 distinct, concise, and non-repetitive suggestions "
+        "to help the parent support healthier screen time habits. Do not repeat any phrase."
     )
     out = flan_generator(prompt, max_new_tokens=150)
     return out[0]["generated_text"].strip()
 
-import re
 def clean_feedback(text):
     parts = re.split(r'(?<=[.!?])\s+', text.strip())
     seen, result = set(), []
@@ -79,31 +81,32 @@ def clean_feedback(text):
             result.append(s)
     return " ".join(result)
 
-@app.before_first_request
-def init_resources():
+@app.before_request
+def lazy_init():
     """
-    Load model, SHAP explainer, and Flan-T5 pipeline only once—
-    after Gunicorn has bound to the port.
+    On the first incoming request, load model, explainer, and GenAI.
+    Subsequent requests skip this.
     """
-    global model, preproc, explainer, flan_generator
+    global _loaded, model, preproc, explainer, flan_generator
+    if _loaded:
+        return
 
-    # Lazy‐import heavy libs
-    import joblib
-    import shap
+    # 1) Lazy-import heavy libs
+    import joblib, shap
     from transformers import pipeline
 
-    # ─── 1) Load your trained pipeline ───
+    # 2) Load your trained pipeline
     model = joblib.load("logistic_model_pipeline.pkl")
     preproc = model.named_steps['preproc']
     clf     = model.named_steps['clf']
 
-    # ─── 2) Prepare SHAP explainer ───
+    # 3) Prepare SHAP explainer
     df_bg = pd.read_csv("Indian_Kids_Screen_Time.csv")[numeric_features + categorical_features]
     df_bg_sample = df_bg.sample(n=100, random_state=0)
     X_bg_processed = preproc.transform(df_bg_sample)
     explainer = shap.LinearExplainer(clf, X_bg_processed, feature_perturbation="interventional")
 
-    # ─── 3) GenAI explainer (Flan-T5) ───
+    # 4) Initialize GenAI pipeline
     flan_generator = pipeline(
         "text2text-generation",
         model="google/flan-t5-large",
@@ -112,12 +115,14 @@ def init_resources():
         temperature=0.7
     )
 
+    _loaded = True
+
 @app.route("/", methods=["GET", "POST"])
 def predict():
     result = explanation = feedback = None
 
     if request.method == "POST":
-        # 1. Gather inputs
+        # Gather inputs
         fv = {
             "Age": float(request.form["age"]),
             "Avg_Daily_Screen_Time_hr": float(request.form["screen_time"]),
@@ -129,29 +134,29 @@ def predict():
         }
         input_df = pd.DataFrame([fv])
 
-        # 2. Make prediction
+        # Prediction
         pred = model.predict(input_df)[0]
         result = "Exceeded Limit" if pred else "Within Limit"
 
-        # 3. Compute SHAP values
+        # SHAP values
         X_proc = preproc.transform(input_df)
         shap_vals = explainer.shap_values(X_proc)
         sample_contribs = shap_vals[0] if not isinstance(shap_vals, list) else shap_vals[1][0]
 
-        # 4. Map back to original features
-        cat_ohe    = preproc.named_transformers_['cat']['onehot']
-        cat_names  = cat_ohe.get_feature_names_out(categorical_features)
+        # Map back to original features
+        cat_ohe       = preproc.named_transformers_['cat']['onehot']
+        cat_names     = cat_ohe.get_feature_names_out(categorical_features)
         feature_names = numeric_features + list(cat_names)
-        raw_feats  = list(zip(feature_names, sample_contribs))
+        raw_feats     = list(zip(feature_names, sample_contribs))
 
-        # 5. Group one-hot columns
+        # Group one-hot columns
         grouped = defaultdict(float)
         for name, val in raw_feats:
             base = name.split('_')[0] if name in cat_names else name
             grouped[base] += val
         top_feats = list(grouped.items())
 
-        # 6. Generate explanation & feedback
+        # Explanations & feedback
         explanation = generate_nl_explanation(top_feats, fv)
         raw_fb      = generate_user_feedback(explanation)
         feedback    = clean_feedback(raw_fb)
