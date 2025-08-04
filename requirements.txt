@@ -1,0 +1,10 @@
+flask
+pandas
+joblib
+transformers
+huggingface_hub
+xgboost
+matplotlib
+openai
+shap
+

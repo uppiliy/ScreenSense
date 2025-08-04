@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Screen Time Predictor</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 600px; margin: 2em auto; }
+        label { display: block; margin-top: 1em; }
+        input, select { width: 100%; padding: 0.5em; }
+        button { margin-top: 1.5em; padding: 0.7em 1.5em; }
+        .result { margin-top: 2em; font-size: 1.2em; }
+        .explain { margin-top: 1em; background: #f9f9f9; padding: 1em; border-radius: 5px; }
+    </style>
+</head>
+<body>
+    <h1>Screen Time Prediction</h1>
+    <form method="POST">
+        <label>Age:</label>
+        <input type="number" name="age" step="1" required>
+
+        <label>Avg Daily Screen Time (hrs):</label>
+        <input type="number" name="screen_time" step="any" required>
+
+        <label>Educational / Recreational Ratio:</label>
+        <input type="number" name="ratio" step="any" required>
+
+        <label>Gender:</label>
+        <select name="gender">
+            <option>Male</option><option>Female</option>
+        </select>
+
+        <label>Primary Device:</label>
+        <select name="device">
+            <option>Smartphone</option>
+            <option>Tablet</option>
+            <option>Laptop</option>
+        </select>
+
+        <label>Health Impacts:</label>
+        <select name="health">
+            <option>None</option>
+            <option>Eyestrain</option>
+            <option>Sleep Disruption</option>
+        </select>
+
+        <label>Urban or Rural:</label>
+        <select name="location">
+            <option>Urban</option>
+            <option>Rural</option>
+        </select>
+
+        <button type="submit">Predict</button>
+    </form>
+
+    {% if result %}
+        <div class="result">
+            <strong>Prediction:</strong> {{ result }}
+        </div>
+    {% endif %}
+
+    {% if explanation %}
+        <div class="explain">
+            <h3>Why this prediction?</h3>
+            <p>{{ explanation }}</p>
+        </div>
+    {% endif %}
+
+    {% if feedback %}
+        <div class="feedback">
+            <h3>Helpful Tips:</h3>
+            <p>{{ feedback }}</p>
+        </div>
+    {% endif %}
+
+</body>
+</html>
