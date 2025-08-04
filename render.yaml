@@ -1,7 +1,10 @@
 services:
   - type: web
-    name: PhoneRiskTracker-API
+    name: ScreenSense-API
     env: python
+    # install your Python deps
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app
+    # use Gunicorn to serve your Flask app, binding to Render’s $PORT
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
+    # optional, but Starter is free tier
     instanceType: starter
