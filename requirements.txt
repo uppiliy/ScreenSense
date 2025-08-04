@@ -7,4 +7,5 @@ xgboost
 matplotlib
 openai
 shap
+pytest
 
